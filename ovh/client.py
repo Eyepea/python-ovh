@@ -35,19 +35,19 @@ It handles requesting credential, signing queries...
 """
 
 import hashlib
-import urllib
 import keyword
 import time
 import json
+import asyncio
+import aiohttp
+from aiohttp import TCPConnector
 
 try:
     from urllib import urlencode
-except ImportError: # pragma: no cover
+except ImportError:  # pragma: no cover
     # Python 3
     from urllib.parse import urlencode
 
-from requests import request, Session
-from requests.exceptions import RequestException
 
 from .config import config
 from .exceptions import (
@@ -149,11 +149,12 @@ class Client(object):
         self._time_delta = None
 
         # use a requests session to reuse HTTPS connections between requests
-        self._session = Session()
+        self._connector = TCPConnector()
 
     ## high level API
 
     @property
+    @asyncio.coroutine
     def time_delta(self):
         """
         Request signatures are valid only for a short amount of time to mitigate
@@ -170,10 +171,9 @@ class Client(object):
         :rtype: int
         """
         if self._time_delta is None:
-            server_time = self.get('/auth/time', _need_auth=False)
+            server_time = yield from self.get('/auth/time', _need_auth=False)
             self._time_delta = server_time - int(time.time())
         return self._time_delta
-
 
     def request_consumerkey(self, access_rules, redirect_url=None):
         """
@@ -252,6 +252,7 @@ class Client(object):
 
         return arguments
 
+    @asyncio.coroutine
     def get(self, _target, _need_auth=True, **kwargs):
         """
         'GET' :py:func:`Client.call` wrapper.
@@ -272,8 +273,9 @@ class Client(object):
             else:
                 _target = '%s?%s' % (_target, query_string)
 
-        return self.call('GET', _target, None, _need_auth)
+        return (yield from self.call('GET', _target, None, _need_auth))
 
+    @asyncio.coroutine
     def put(self, _target, _need_auth=True, **kwargs):
         """
         'PUT' :py:func:`Client.call` wrapper
@@ -287,8 +289,9 @@ class Client(object):
             the default
         """
         kwargs = self._canonicalize_kwargs(kwargs)
-        return self.call('PUT', _target, kwargs, _need_auth)
+        return (yield from (self.call('PUT', _target, kwargs, _need_auth)))
 
+    @asyncio.coroutine
     def post(self, _target, _need_auth=True, **kwargs):
         """
         'POST' :py:func:`Client.call` wrapper
@@ -302,8 +305,9 @@ class Client(object):
             the default
         """
         kwargs = self._canonicalize_kwargs(kwargs)
-        return self.call('POST', _target, kwargs, _need_auth)
+        return (yield from self.call('POST', _target, kwargs, _need_auth))
 
+    @asyncio.coroutine
     def delete(self, _target, _need_auth=True):
         """
         'DELETE' :py:func:`Client.call` wrapper
@@ -312,10 +316,11 @@ class Client(object):
         :param string _need_auth: If True, send authentication headers. This is
             the default
         """
-        return self.call('DELETE', _target, None, _need_auth)
+        return (yield from self.call('DELETE', _target, None, _need_auth))
 
     ## low level helpers
 
+    @asyncio.coroutine
     def call(self, method, path, data=None, need_auth=True):
         """
         Lowest level call helper. If ``consumer_key`` is not ``None``, inject
@@ -357,7 +362,7 @@ class Client(object):
                 raise InvalidKey("Invalid ConsumerKey '%s'" %
                                  self._consumer_key)
 
-            now = str(int(time.time()) + self.time_delta)
+            now = str(int(time.time()) + (yield from self.time_delta))
             signature = hashlib.sha1()
             signature.update("+".join([
                 self._application_secret, self._consumer_key,
@@ -372,16 +377,15 @@ class Client(object):
 
         # attempt request
         try:
-            result = self._session.request(method, target, headers=headers,
-                                           data=body)
-        except RequestException as error:
+            result = yield from (aiohttp.request(method, target, headers=headers, data=body, connector=self._connector))
+        except aiohttp.ClientResponseError as error:
             raise HTTPError("Low HTTP request failed error", error)
 
-        status = result.status_code
+        status = result.status
 
         # attempt to decode and return the response
         try:
-            json_result = result.json()
+            json_result = yield from result.json()
         except ValueError as error:
             raise InvalidResponse("Failed to decode API response", error)
 
